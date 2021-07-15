@@ -8,3 +8,7 @@
 *.data-00000-of-00001
 
 *.ckpt
+
+train_defect3cls_0713/
+
+dataset_GDS1/

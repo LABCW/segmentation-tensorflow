@@ -14,54 +14,37 @@ from utils import utils
 from utils.utils import COLOUR_LIST
 from utils.helpers import colour_code_segmentation, one_hot_it
 from builders import model_builder
-import tensorflow as tf
+from utils.default import _C as config
+from utils.default import update_config
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-
-
-def str2bool(v):
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-
-IMAGE_SIZE = 768
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_epochs', type=int, default=10000, help='Number of epochs to train for')
-parser.add_argument('--epoch_start_i', type=int, default=0, help='Start counting epochs from this number')
-parser.add_argument('--dataset', type=str, default="sample", help='Dataset you are using.')
-parser.add_argument('--crop_height', type=int, default=IMAGE_SIZE, help='Height of cropped input image to network')
-parser.add_argument('--crop_width', type=int, default=IMAGE_SIZE, help='Width of cropped input image to network')
-parser.add_argument('--h_flip', type=str2bool, default=True, help='Whether to randomly flip the image horizontally for data augmentation')
-parser.add_argument('--v_flip', type=str2bool, default=True, help='Whether to randomly flip the image vertically for data augmentation')
-parser.add_argument('--brightness', type=float, default=0.5, help='Whether to randomly change the image brightness for data augmentation. Specifies the max bightness change as a factor between 0.0 and 1.0. For example, 0.1 represents a max brightness change of 10%% (+-).')
-parser.add_argument('--model', type=str, default="DeepLabV3_plus", help='The model you are using. See model_builder.py for supported models')
-parser.add_argument('--frontend', type=str, default="ResNet101", help='The frontend you are using. See frontend_builder.py for supported models')
+parser.add_argument('--cfg', type=str, default="config.yaml", help='config')
 args = parser.parse_args()
+update_config(config, args)
+print("---------config-----------")
+print(config)
+print("--------------------------")
+os.environ['CUDA_VISIBLE_DEVICES'] = config.TRAIN.GPUS[-1]
 
 g_step = 0
-num_classes = 2  # 类别数量，多分类需要背景类
-CHANNEL_NUM = 3  # 'rgb' or 'gray'
-learning_rate = 0.00001
-BATCH_SIZE = 1
-have_ok_image = True
-read_ok = 3
-checkpoint_path = '/home/root12/jinsong/miniled_training_data/checkpoint_DeepLabV3_plus'
-use_focal_loss = False  # 是否用focal loss
-use_class_balance_weights = False
-class_name = ['0', '1']  # 名字与mask的命名要对应,背景类不需要写，要按照优先级排列，优先级高的类型放后面
-class_model = 'multi_label'  # 配置多分类和多标签：multi_classify、multi_label
 label_gray_diff = 40  # 多分类的灰度差，用于tensorboard显示
-image_train_dir = '/home/root12/jinsong/miniled_training_data/ng'  # 真实样本，完整的label
-mask_train_dir = '/home/root12/jinsong/miniled_training_data/label'
-# ok_image_dir = '/home/root12/jinsong/miniled_training_data/ok'
-# crop_dir = '/home/xddz/workspace/zw/chip_training_data/croped_image'
-crop_dir = None
-# crop_rand_threhold = 0.3
-ok_root_dir = '/home/root12/jinsong/miniled_training_data/ok'
-ok_file = ['ok', 'nothing']
+
+num_classes = config.DATASET.NUM_CLASSES  # 类别数量，多分类需要背景类
+CHANNEL_NUM = config.MODEL.CHANNEL_NUM  # 'rgb' or 'gray'
+BATCH_SIZE = config.MODEL.BATCH
+class_model = config.MODEL.class_model  # 配置多分类和多标签：multi_classify、multi_label
+
+class_name = config.DATASET.CLASSES_NAME  # 名字与mask的命名要对应,背景类不需要写，要按照优先级排列，优先级高的类型放后面
+image_train_dir = os.path.join(config.DATASET.ROOT, config.DATASET.image_train_dir)  # 真实样本，完整的label
+mask_train_dir = os.path.join(config.DATASET.ROOT, config.DATASET.mask_train_dir)
+ok_image_dir = config.DATASET.ok_image_dir
+have_ok_image = True if ok_image_dir else False
+read_ok = 3
+
+learning_rate = config.TRAIN.learning_rate
+checkpoint_path = config.TRAIN.checkpoint_path
+use_focal_loss = config.TRAIN.focal_loss  # 是否用focal loss
+use_class_balance_weights = True if config.TRAIN.class_balance else False
 
 # 给每个类一个colour用于生成onehot
 label_values = list()
@@ -107,12 +90,15 @@ def rotate(image, angle=90):
     imgRotation = cv2.warpAffine(image, matRotation, (widthNew, heightNew), borderValue=(0, 0, 0))
     return imgRotation
 
-
-def resize_image(image, max_edge=IMAGE_SIZE, interpolation='INTER_LINEAR'):
-    # 如果最大边长大于max_edge，限制最大边长到max_edge
-    max_size = image.shape[0] if image.shape[0] > image.shape[1] else image.shape[1]
-    if max_size > max_edge:
-        resize_ratio = max_edge / float(max_size)
+def resize_image(image, size, interpolation='INTER_LINEAR'):
+    if image.shape[0] > size[1]:
+        resize_ratio = size[1] / float(image.shape[0])
+        if interpolation == 'INTER_LINEAR':
+            image = cv2.resize(image, None, fx=resize_ratio, fy=resize_ratio, interpolation=cv2.INTER_LINEAR)
+        else:
+            image = cv2.resize(image, None, fx=resize_ratio, fy=resize_ratio, interpolation=cv2.INTER_NEAREST)
+    if image.shape[1] > size[0]:
+        resize_ratio = size[0] / float(image.shape[1])
         if interpolation == 'INTER_LINEAR':
             image = cv2.resize(image, None, fx=resize_ratio, fy=resize_ratio, interpolation=cv2.INTER_LINEAR)
         else:
@@ -133,29 +119,11 @@ def focal_loss_weight_map(y_true_cls, y_pred_cls, n_class):
     flat_y_true_cls_split = tf.split(flat_y_true_cls, n_class, axis=1)
     flat_y_pred_cls_split = tf.split(flat_y_pred_cls, n_class, axis=1)
 
-    # 样本越易分，pt越接近1，则贡献的loss就越小
-    # 样本越难分，pt越接近0，则贡献的loss就越小
-    # pt0 = flat_y_true_cls_split[0] * flat_y_pred_cls_split[0] + \
-    #       (1.0 - flat_y_true_cls_split[0]) * (1.0 - flat_y_pred_cls_split[0])
-    #
-    # pt1 = flat_y_true_cls_split[1] * flat_y_pred_cls_split[1] + \
-    #       (1.0 - flat_y_true_cls_split[1]) * (1.0 - flat_y_pred_cls_split[1])
-    #
-    # pt2 = flat_y_true_cls_split[2] * flat_y_pred_cls_split[2] + \
-    #       (1.0 - flat_y_true_cls_split[2]) * (1.0 - flat_y_pred_cls_split[2])
-
     pt_list = list()
     for n in range(n_class):
         pt = flat_y_true_cls_split[n] * flat_y_pred_cls_split[n] + \
               (1.0 - flat_y_true_cls_split[n]) * (1.0 - flat_y_pred_cls_split[n])
         pt_list.append(pt)
-
-    # 易分的样本，pt接近1，tf.pow((1.0 - pt0), gamma)的结果就非常接近0
-    # 难分的样本，pt接近0，tf.pow((1.0 - pt0), gamma)的结果就非常接近1
-    # focal loss 就是通过分割的结果与gt进行比较，区分出容易分割和不容易分割的像素，然后有针对性的分配权重
-    # weight_map_0 = alpha * tf.pow((1.0 - pt0), gamma)
-    # weight_map_1 = alpha * tf.pow((1.0 - pt1), gamma)
-    # weight_map_2 = alpha * tf.pow((1.0 - pt2), gamma)
 
     weight_map_list = list()
     for n in range(n_class):
@@ -168,35 +136,6 @@ def focal_loss_weight_map(y_true_cls, y_pred_cls, n_class):
         weighted_map = tf.concat(tuple(weight_map_list), axis=1)
 
     return weighted_map
-
-# def focal_loss_weight_map(y_true_cls, y_pred_cls, n_class):
-#     # 生成focal loss的weight map
-#     gamma = 2.
-#     alpha = 0.5
-#
-#     # 展平
-#     flat_y_true_cls = tf.reshape(y_true_cls, [-1, n_class])
-#     flat_y_pred_cls = tf.reshape(y_pred_cls, [-1, n_class])
-#
-#     # 分离通道
-#     flat_y_true_cls_split = tf.split(flat_y_true_cls, n_class, axis=1)
-#     flat_y_pred_cls_split = tf.split(flat_y_pred_cls, n_class, axis=1)
-#
-#     # 样本越易分，pt越接近1，则贡献的loss就越小
-#     # 样本越难分，pt越接近0，则贡献的loss就越小
-#     pt0 = flat_y_true_cls_split[0] * flat_y_pred_cls_split[0] + \
-#         (1.0 - flat_y_true_cls_split[0]) * (1.0 - flat_y_pred_cls_split[0])
-#
-#     # 易分的样本，pt接近1，tf.pow((1.0 - pt0), gamma)的结果就非常接近0
-#     # 难分的样本，pt接近0，tf.pow((1.0 - pt0), gamma)的结果就非常接近1
-#     # focal loss 就是通过分割的结果与gt进行比较，区分出容易分割和不容易分割的像素，然后有针对性的分配权重
-#     weight_map_0 = alpha * tf.pow((1.0 - pt0), gamma)
-#
-#     # 拼接三个通道
-#     # weighted_map = tf.concat((weight_map_0, weight_map_1), axis=1)
-#     weighted_map = weight_map_0
-#     return weighted_map
-
 
 def get_loss(logits, label_input, use_focal_loss, use_class_balance_weights, num_classes, class_model):
     # 展平
@@ -305,12 +244,14 @@ def random_stretch(image, labels, rand_threhold=0.3):
     return image, labels
 
 
-def random_resize_and_paste(image, labels, rand_threhold=0.25, corner_threhold=0.7):
+def random_resize_and_paste(image, labels, size, rand_threhold=0.25, corner_threhold=0.7):
+    w_init = size[0]
+    h_init = size[1]
     rand_val = random.random()
     if rand_val < rand_threhold:
         # 对样本进行一定概率的随机尺寸缩放
-        rand_w = np.random.randint(int(IMAGE_SIZE * 0.7), IMAGE_SIZE)
-        rand_h = np.random.randint(int(IMAGE_SIZE * 0.7), IMAGE_SIZE)
+        rand_w = np.random.randint(int(w_init * 0.7), w_init)
+        rand_h = np.random.randint(int(h_init * 0.7), h_init)
         image = cv2.resize(image, (rand_w, rand_h))
         labels = [cv2.resize(label, (rand_w, rand_h)) for label in labels]
 
@@ -318,8 +259,8 @@ def random_resize_and_paste(image, labels, rand_threhold=0.25, corner_threhold=0
     w = image.shape[1]
 
     # 计算图像粘贴的起始点范围
-    range_x = IMAGE_SIZE - w - 1
-    range_y = IMAGE_SIZE - h - 1
+    range_x = w_init - w - 1
+    range_y = h_init - h - 1
 
     if range_x < 0:
         range_x = 0
@@ -339,17 +280,21 @@ def random_resize_and_paste(image, labels, rand_threhold=0.25, corner_threhold=0
         rand_x = pos_list[rand_index][1]
 
     # 生成空白图像（全白色），用于装载原始图像
+    # 彩色图改为生成随机彩图
     if CHANNEL_NUM == 3:
-        paste_image = np.ones([IMAGE_SIZE, IMAGE_SIZE, 3], dtype=np.uint8) * 255
+        paste_image = np.ones([h_init, w_init, 3], dtype=np.uint8) * 255
+        # randomByteArray = bytearray(os.urandom(w_init*h_init*3))
+        # flatNumpyArray = np.array(randomByteArray)
+        # paste_image = flatNumpyArray.reshape(h_init, w_init, 3)
         paste_image[rand_y:h + rand_y, rand_x:w + rand_x, :] = image[:, :, :]
     else:
-        paste_image = np.ones([IMAGE_SIZE, IMAGE_SIZE], dtype=np.uint8) * 255
+        paste_image = np.ones([h_init, w_init], dtype=np.uint8) * 255
         paste_image[rand_y:h + rand_y, rand_x:w + rand_x] = image[:, :]
 
     new_labels = []
     for n in range(num_classes):
         # 生成空白图像（全黑色），用于装载前景掩模图像
-        score_map = np.zeros([IMAGE_SIZE, IMAGE_SIZE], dtype=np.uint8)
+        score_map = np.zeros([h_init, w_init], dtype=np.uint8)
         score_map[rand_y:h + rand_y, rand_x:w + rand_x] = labels[n][:, :]
         new_labels.append(score_map)
 
@@ -368,7 +313,6 @@ def random_jpg_quality(input_image):
 
     return input_image
 
-
 def random_bright(input_image):
     # 随机亮度
     if random.randint(0, 1):
@@ -378,51 +322,11 @@ def random_bright(input_image):
 
     return input_image
 
-
-def random_paste_croped_image(crop_image_list, image, label, crop_rand_threhold=0.3):
-    rand_val = random.random()
-    if len(crop_image_list) == 0:
-        return image, label
-
-    if rand_val < crop_rand_threhold:
-        crop_image_path = random.choice(crop_image_list)
-        crop_image = cv2.imread(crop_image_path)
-
-        # 随机旋转
-        if random.randint(0, 1):
-            angle = random.choice([90, 180, 270])
-            crop_image = rotate(crop_image, angle=angle)
-
-        # 随机水平翻转
-        if random.randint(0, 1):
-            crop_image = cv2.flip(crop_image, 1)
-
-        # 随机垂直翻转
-        if random.randint(0, 1):
-            crop_image = cv2.flip(crop_image, 0)
-
-        h = crop_image.shape[0]
-        w = crop_image.shape[1]
-
-        h_start = np.random.randint(1, IMAGE_SIZE-h-1)
-        w_start = np.random.randint(1, IMAGE_SIZE-w-1)
-
-        image[h_start: h_start+h, w_start: w_start+w, :] = crop_image[:]
-
-        label[h_start: h_start+h, w_start: w_start+w] = 255
-
-    return image, label
-
-
-ok_image_list = [list_images(os.path.join(ok_root_dir, f)) for f in ok_file]
-
-crop_image_list = list_images(crop_dir) if (crop_dir is not None) else []
-
 # 输入的图像
-net_input = tf.placeholder(tf.float32, shape=[BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, CHANNEL_NUM])
+net_input = tf.placeholder(tf.float32, shape=[BATCH_SIZE, config.MODEL.HEIGHT, config.MODEL.WIDTH, CHANNEL_NUM])
 
 # 输入的label
-net_output = tf.placeholder(tf.float32, shape=[BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, num_classes])
+net_output = tf.placeholder(tf.float32, shape=[BATCH_SIZE, config.MODEL.HEIGHT, config.MODEL.WIDTH, num_classes])
 
 # 全局步数
 global_step = tf.Variable(0)
@@ -430,9 +334,12 @@ global_step = tf.Variable(0)
 # net_input = mean_image_subtraction(net_input)  # 图像归一化
 
 # 构造model
-logits, init_fn = model_builder.build_model(model_name=args.model, frontend=args.frontend, net_input=net_input,
-                                            num_classes=num_classes, crop_width=args.crop_width,
-                                            crop_height=args.crop_height, dropout_p=0.0, is_training=True)
+logits, init_fn = model_builder.build_model(model_name=config.MODEL.NAME, 
+                                            frontend=config.MODEL.FRONTEND, net_input=net_input,
+                                            num_classes=num_classes, 
+                                            crop_width=config.MODEL.WIDTH,
+                                            crop_height=config.MODEL.HEIGHT, 
+                                            dropout_p=0.0, is_training=True)
 print(logits)
 if class_model == 'multi_classify':
     activation_logits = tf.nn.softmax(logits)
@@ -441,13 +348,15 @@ if class_model == 'multi_classify':
 
     gt_label = tf.argmax(net_output, axis=-1)
 
-    gt_maps = [tf.reshape(gt_label[n, :, :], (1, IMAGE_SIZE, IMAGE_SIZE, 1)) for n in range(BATCH_SIZE)]
+    gt_maps = [tf.reshape(gt_label[n, :, :], (1, config.MODEL.HEIGHT, config.MODEL.WIDTH, 1)) for n in range(BATCH_SIZE)]
 
     pred = tf.argmax(activation_logits, axis=-1)
     # 预测结果
-    pred_maps = [tf.reshape(pred[n, :, :], (1, IMAGE_SIZE, IMAGE_SIZE, 1)) for n in range(BATCH_SIZE)]
+    pred_maps = [tf.reshape(pred[n, :, :], (1, config.MODEL.HEIGHT, config.MODEL.WIDTH, 1)) for n in range(BATCH_SIZE)]
 
-    tf.summary.image('input', net_input)
+    img_show = tf.reshape(net_input[:, :, :, :], (1, config.MODEL.HEIGHT, config.MODEL.WIDTH, 3))
+    img_show = tf.reverse(img_show, axis=[-1]) 
+    tf.summary.image('input', img_show)
     tf.summary.scalar('loss', loss)
 
     for n in range(BATCH_SIZE):
@@ -467,18 +376,18 @@ elif class_model == 'multi_label':
     gt_maps = list()
     for n in range(BATCH_SIZE):
         for i in range(num_classes):
-            gt_maps.append(tf.reshape(net_output[n, :, :, i], (1, IMAGE_SIZE, IMAGE_SIZE, 1)))
-    # gt_maps = [tf.reshape(net_output[0, :, :, i], (1, IMAGE_SIZE, IMAGE_SIZE, 1)) for i in range(num_classes)]
+            gt_maps.append(tf.reshape(net_output[n, :, :, i], (1, config.MODEL.HEIGHT, config.MODEL.WIDTH, 1)))
 
     # 预测结果
     pred_maps = list()
     for n in range(BATCH_SIZE):
         for i in range(num_classes):
-            pred_maps.append(tf.reshape(activation_logits[n, :, :, i], (1, IMAGE_SIZE, IMAGE_SIZE, 1)))
-    # pred_maps = [tf.reshape(activation_logits[0, :, :, i], (1, IMAGE_SIZE, IMAGE_SIZE, 1)) for i in range(num_classes)]
+            pred_maps.append(tf.reshape(activation_logits[n, :, :, i], (1, config.MODEL.HEIGHT, config.MODEL.WIDTH, 1)))
 
     for n in range(BATCH_SIZE):
-        tf.summary.image('input/image_%s' % str(n), tf.reshape(net_input[n, :, :, :], (1, IMAGE_SIZE, IMAGE_SIZE, 3)))
+        img_show = tf.reshape(net_input[n, :, :, :], (1, config.MODEL.HEIGHT, config.MODEL.WIDTH, 3))
+        img_show = tf.reverse(img_show, axis=[-1]) 
+        tf.summary.image('input/image_%s' % str(n), img_show)
     tf.summary.scalar('loss', loss)
     for n in range(BATCH_SIZE):
 
@@ -486,27 +395,28 @@ elif class_model == 'multi_label':
             tf.summary.image('image/%s_score_map_%s' % (class_name[i], str(n)), gt_maps[n*num_classes+i])
             tf.summary.image('image/%s_score_map_pred_%s' % (class_name[i], str(n)), pred_maps[n*num_classes+i])
 
-# opt = tf.train.RMSPropOptimizer(learning_rate=0.0001, decay=0.995).minimize(loss, var_list=[var for var in tf.trainable_variables()])
-# opt = tf.train.AdamOptimizer(learning_rate=0.0001).minimize(loss, var_list=[var for var in tf.trainable_variables()])
 opt = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss, global_step=global_step)
-saver = tf.train.Saver()
+
 summary_op = tf.summary.merge_all()
+summary_writer = tf.summary.FileWriter(checkpoint_path, tf.get_default_graph())
 
 # NG样本
 train_input_names = os.listdir(image_train_dir)
 
 # OK样本
-# ok_image_names = os.listdir(ok_image_dir) if (ok_image_dir is not None) else None
+ok_image_names = os.listdir(ok_image_dir) if (ok_image_dir is not None) else None
 
 print("\n***** Begin training *****")
 
+print("---------- ", checkpoint_path)
 if not os.path.isdir(checkpoint_path):
     os.makedirs(checkpoint_path)
 
-summary_writer = tf.summary.FileWriter(checkpoint_path, tf.get_default_graph())
-
 # Do the training here
-with tf.Session() as sess:
+saver = tf.train.Saver(max_to_keep=2)
+tf_config = tf.ConfigProto()
+tf_config.gpu_options.allow_growth=True
+with tf.Session(config=tf_config) as sess:
     sess.run(tf.global_variables_initializer())
 
     # 重载历史checkpoint
@@ -518,7 +428,8 @@ with tf.Session() as sess:
     sess.graph.finalize()
 
     # 对真实样本进行迭代，每迭代完一次真实样本算是一次epoch
-    for epoch in range(args.epoch_start_i, args.num_epochs):
+    for epoch in range(config.TRAIN.epoch_start_i, config.TRAIN.num_epochs):
+        epoch_st=time.time()
         # 打乱样本顺序
         id_list = np.random.permutation(len(train_input_names))
 
@@ -542,8 +453,8 @@ with tf.Session() as sess:
             if i != 0 and i % read_ok == 0 and (neg_flag is False) and have_ok_image:
                 # OK
                 neg_flag = True
-
-                image_path = random.choice(ok_image_list[random.choice([x for x in range(len(ok_file))])])
+                base_name = random.choice(ok_image_names)
+                image_path = os.path.join(ok_image_dir, base_name)
 
                 if CHANNEL_NUM == 3:
                     im_in = cv2.imread(image_path)
@@ -552,10 +463,6 @@ with tf.Session() as sess:
 
                 for n in range(num_classes):
                     score_map_in.append(np.zeros([im_in.shape[0], im_in.shape[1]], dtype=np.uint8))
-
-                if num_classes == 1:
-                    im_in, label = random_paste_croped_image(crop_image_list, im_in, score_map_in[0])
-                    score_map_in = [label]
 
             else:
                 # NG
@@ -572,17 +479,8 @@ with tf.Session() as sess:
                 if class_model == 'multi_label':
                     # 多标签
                     for n in range(num_classes):
-                        if '.jpg' in base_name:
-                            mask_path = os.path.join(mask_train_dir,
-                                                     base_name.replace('.jpg', '_%s_mask.png' % class_name[n]))
-                        else:
-                            mask_path = os.path.join(mask_train_dir,
-                                                     base_name.replace('.png', '_%s_mask.png' % class_name[n]))
+                        mask_path = os.path.join(mask_train_dir, base_name.split('.')[0] + '_%s' % class_name[n] + config.DATASET.mask_suffix)
                         score_map_in.append(cv2.imread(mask_path, flags=0))
-
-                    if num_classes == 1:
-                        im_in, label = random_paste_croped_image(crop_image_list, im_in, score_map_in[0])
-                        score_map_in = [label]
 
                 elif class_model == 'multi_classify':
                     # 多分类
@@ -591,12 +489,7 @@ with tf.Session() as sess:
 
                     # 再加载缺陷类的mask,循环时需要减去背景类
                     for n in range(num_classes-1):
-                        if '.jpg' in base_name:
-                            mask_path = os.path.join(mask_train_dir,
-                                                     base_name.replace('.jpg', '_%s_mask.png' % class_name[n]))
-                        else:
-                            mask_path = os.path.join(mask_train_dir,
-                                                     base_name.replace('.png', '_%s_mask.png' % class_name[n]))
+                        mask_path = os.path.join(mask_train_dir, base_name.split('.')[0] + '_%s' % class_name[n] + config.DATASET.mask_suffix)
                         score_map_in.append(cv2.imread(mask_path, flags=0))
 
             # 数据增强
@@ -605,15 +498,13 @@ with tf.Session() as sess:
             im_in, score_map_in = random_stretch(im_in, score_map_in)
 
             # 限制图像的最大边长，原图的双线性。label用双线性，最近邻当前景太细太小，会有像素上的损失
-            im_in, _ = resize_image(im_in, interpolation='INTER_LINEAR')
-            score_map_in = [resize_image(cell, interpolation='INTER_LINEAR')[0] for cell in score_map_in]
+            im_in, _ = resize_image(im_in,size=(config.MODEL.WIDTH, config.MODEL.HEIGHT), interpolation='INTER_LINEAR')
+            score_map_in = [resize_image(cell,size=(config.MODEL.WIDTH, config.MODEL.HEIGHT), interpolation='INTER_LINEAR')[0] for cell in score_map_in]
 
-            im_in, score_map_in = random_resize_and_paste(im_in, score_map_in)
+            im_in, score_map_in = random_resize_and_paste(im_in, score_map_in,size=(config.MODEL.WIDTH, config.MODEL.HEIGHT))
 
             im_in = random_jpg_quality(im_in)
             im_in = random_bright(im_in)
-            # cv2.imshow('image', input_image)
-            # cv2.waitKey()
 
             # 把图像转成浮点
             im_in = im_in.astype(np.float32)
@@ -641,8 +532,6 @@ with tf.Session() as sess:
             input_image = np.float32(im_in) / 255.
             input_image_batch.append(input_image)
             output_image_batch.append(output_image)
-            # input_image_batch.append(np.expand_dims(input_image, axis=0))
-            # output_image_batch.append(np.expand_dims(output_image, axis=0))
 
             if len(input_image_batch) == BATCH_SIZE:
                 g_step += 1
@@ -660,23 +549,24 @@ with tf.Session() as sess:
                 _, current, summary_str = sess.run([opt, loss, summary_op], feed_dict={net_input: input_image_batch,
                                                                                        net_output: output_image_batch})
                 if g_step % 50 == 0:
-                    string_print = "g_step = %d Current_Loss = %.6f " % (g_step, current)
+                    string_print = "Epoch = %d g_step = %d Current_Loss = %.6f " % (epoch,g_step, current)
                     utils.LOG(string_print)
-
-                if g_step % 50 == 0:
-                    saver.save(sess, checkpoint_path + "/model.ckpt", global_step=global_step)
-
-                if g_step % 50 == 0:
-                    # g_step % 50 == 1 的时候存真实样本
-                    # g_step % 50 == 0 的时候存附加样本
                     summary_writer.add_summary(summary_str, global_step=g_step)
+
+                if g_step % config.TRAIN.save_step == 0:
+                    saver.save(sess, checkpoint_path + "/model.ckpt", global_step=global_step)
+                    
                 input_image_batch = []
                 output_image_batch = []
             else:
                 continue
 
-
-
-
-
-
+        epoch_time=time.time()-epoch_st
+        remain_time=epoch_time*(config.TRAIN.num_epochs-1-epoch)
+        m, s = divmod(remain_time, 60)
+        h, m = divmod(m, 60)
+        if s!=0:
+            train_time="Remaining training time = %d hours %d minutes %d seconds\n"%(h,m,s)
+        else:
+            train_time="Remaining training time : Training completed.\n"
+        utils.LOG(train_time)

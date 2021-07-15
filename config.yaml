@@ -1,0 +1,26 @@
+MODEL:
+  NAME: 'DeepLabV3_plus'
+  FRONTEND: 'ResNet50'
+  BATCH: 2
+  HEIGHT: 512
+  WIDTH: 512
+  CHANNEL_NUM: 3
+
+DATASET:
+  ROOT: 'dataset_GDS1'
+  image_train_dir: 'images'
+  mask_train_dir: 'labels'
+  mask_suffix: '.png'
+  NUM_CLASSES: 1
+  CLASSES_NAME: ['crash']
+  ok_image_dir: None
+  
+TRAIN:
+  GPUS: 'GPU:1'
+  checkpoint_path: 'dataset_GDS1/ckpt'
+  num_epochs: 10000
+  epoch_start_i: 0  
+  learning_rate: 0.0005
+  save_step: 100
+  focal_loss: False
+  class_balance: None
