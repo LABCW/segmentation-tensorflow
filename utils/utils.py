@@ -19,44 +19,6 @@ COLOUR_LIST = [[0, 0, 0], [64, 128, 64], [192, 0, 128], [0, 128, 192], [0, 128, 
      [128, 128, 128], [64, 128, 192], [0, 0, 64], [0, 64, 64], [192, 64, 128], [128, 128, 0], [192, 128, 192],
      [64, 0, 64], [192, 192, 0], [64, 192, 0]]
 
-def prepare_data(dataset_dir):
-    train_input_names=[]
-    train_output_names=[]
-    val_input_names=[]
-    val_output_names=[]
-    test_input_names=[]
-    test_output_names=[]
-    for file in os.listdir(dataset_dir + "/train"):
-        cwd = os.getcwd()
-        train_input_names.append(cwd + "/" + dataset_dir + "/train/" + file)
-    for file in os.listdir(dataset_dir + "/train_labels"):
-        cwd = os.getcwd()
-        train_output_names.append(cwd + "/" + dataset_dir + "/train_labels/" + file)
-    for file in os.listdir(dataset_dir + "/val"):
-        cwd = os.getcwd()
-        val_input_names.append(cwd + "/" + dataset_dir + "/val/" + file)
-    for file in os.listdir(dataset_dir + "/val_labels"):
-        cwd = os.getcwd()
-        val_output_names.append(cwd + "/" + dataset_dir + "/val_labels/" + file)
-    for file in os.listdir(dataset_dir + "/test"):
-        cwd = os.getcwd()
-        test_input_names.append(cwd + "/" + dataset_dir + "/test/" + file)
-    for file in os.listdir(dataset_dir + "/test_labels"):
-        cwd = os.getcwd()
-        test_output_names.append(cwd + "/" + dataset_dir + "/test_labels/" + file)
-    train_input_names.sort(),train_output_names.sort(), val_input_names.sort(), val_output_names.sort(), test_input_names.sort(), test_output_names.sort()
-    return train_input_names,train_output_names, val_input_names, val_output_names, test_input_names, test_output_names
-
-def load_image(path):
-    image = cv2.cvtColor(cv2.imread(path,-1), cv2.COLOR_BGR2RGB)
-    return image
-
-# Takes an absolute file path and returns the name of the file without th extension
-def filepath_to_name(full_name):
-    file_name = os.path.basename(full_name)
-    file_name = os.path.splitext(file_name)[0]
-    return file_name
-
 # Print with time. To console or file
 def LOG(X, f=None):
     time_stamp = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
@@ -65,17 +27,6 @@ def LOG(X, f=None):
     else:
         f.write(time_stamp + " " + X)
 
-
-# Count total number of parameters in the model
-def count_params():
-    total_parameters = 0
-    for variable in tf.trainable_variables():
-        shape = variable.get_shape()
-        variable_parameters = 1
-        for dim in shape:
-            variable_parameters *= dim.value
-        total_parameters += variable_parameters
-    print("This model has %d trainable parameters"% (total_parameters))
 
 # Subtracts the mean images from ImageNet
 def mean_image_subtraction(inputs, means=[123.68, 116.78, 103.94]):
@@ -88,218 +39,214 @@ def mean_image_subtraction(inputs, means=[123.68, 116.78, 103.94]):
         channels[i] -= means[i]
     return tf.concat(axis=3, values=channels)
 
-def _lovasz_grad(gt_sorted):
+def list_images(path, file_type='images'):
     """
-    Computes gradient of the Lovasz extension w.r.t sorted errors
-    See Alg. 1 in paper
+    列出文件夹中所有的文件，返回
+    :param file_type: 'images' or 'any'
+    :param path: a directory path, like '../data/pics'
+    :return: all the images in the directory
     """
-    gts = tf.reduce_sum(gt_sorted)
-    intersection = gts - tf.cumsum(gt_sorted)
-    union = gts + tf.cumsum(1. - gt_sorted)
-    jaccard = 1. - intersection / union
-    jaccard = tf.concat((jaccard[0:1], jaccard[1:] - jaccard[:-1]), 0)
-    return jaccard
-
-def _flatten_probas(probas, labels, ignore=None, order='BHWC'):
-    """
-    Flattens predictions in the batch
-    """
-    if order == 'BCHW':
-        probas = tf.transpose(probas, (0, 2, 3, 1), name="BCHW_to_BHWC")
-        order = 'BHWC'
-    if order != 'BHWC':
-        raise NotImplementedError('Order {} unknown'.format(order))
-    C = probas.shape[3]
-    probas = tf.reshape(probas, (-1, C))
-    labels = tf.reshape(labels, (-1,))
-    if ignore is None:
-        return probas, labels
-    valid = tf.not_equal(labels, ignore)
-    vprobas = tf.boolean_mask(probas, valid, name='valid_probas')
-    vlabels = tf.boolean_mask(labels, valid, name='valid_labels')
-    return vprobas, vlabels
-
-def _lovasz_softmax_flat(probas, labels, only_present=True):
-    """
-    Multi-class Lovasz-Softmax loss
-      probas: [P, C] Variable, class probabilities at each prediction (between 0 and 1)
-      labels: [P] Tensor, ground truth labels (between 0 and C - 1)
-      only_present: average only on classes present in ground truth
-    """
-    C = probas.shape[1]
-    losses = []
-    present = []
-    for c in range(C):
-        fg = tf.cast(tf.equal(labels, c), probas.dtype) # foreground for class c
-        if only_present:
-            present.append(tf.reduce_sum(fg) > 0)
-        errors = tf.abs(fg - probas[:, c])
-        errors_sorted, perm = tf.nn.top_k(errors, k=tf.shape(errors)[0], name="descending_sort_{}".format(c))
-        fg_sorted = tf.gather(fg, perm)
-        grad = _lovasz_grad(fg_sorted)
-        losses.append(
-            tf.tensordot(errors_sorted, tf.stop_gradient(grad), 1, name="loss_class_{}".format(c))
-                      )
-    losses_tensor = tf.stack(losses)
-    if only_present:
-        present = tf.stack(present)
-        losses_tensor = tf.boolean_mask(losses_tensor, present)
-    return losses_tensor
-
-def lovasz_softmax(probas, labels, only_present=True, per_image=False, ignore=None, order='BHWC'):
-    """
-    Multi-class Lovasz-Softmax loss
-      probas: [B, H, W, C] or [B, C, H, W] Variable, class probabilities at each prediction (between 0 and 1)
-      labels: [B, H, W] Tensor, ground truth labels (between 0 and C - 1)
-      only_present: average only on classes present in ground truth
-      per_image: compute the loss per image instead of per batch
-      ignore: void class labels
-      order: use BHWC or BCHW
-    """
-    probas = tf.nn.softmax(probas, 3)
-    labels = helpers.reverse_one_hot(labels)
-
-    if per_image:
-        def treat_image(prob, lab):
-            prob, lab = tf.expand_dims(prob, 0), tf.expand_dims(lab, 0)
-            prob, lab = _flatten_probas(prob, lab, ignore, order)
-            return _lovasz_softmax_flat(prob, lab, only_present=only_present)
-        losses = tf.map_fn(treat_image, (probas, labels), dtype=tf.float32)
-    else:
-        losses = _lovasz_softmax_flat(*_flatten_probas(probas, labels, ignore, order), only_present=only_present)
-    return losses
+    IMAGE_SUFFIX = ['.jpg', '.JPG', '.jpeg', '.JPEG', '.png', '.Png', '.PNG', '.tiff', '.bmp', '.tif']
+    # IMAGE_SUFFIX = ['.png']
+    paths = []
+    for file_and_dir in os.listdir(path):
+        if os.path.isfile(os.path.join(path, file_and_dir)):
+            if file_type == 'images':
+                if os.path.splitext(file_and_dir)[1] in IMAGE_SUFFIX:
+                    paths.append(os.path.abspath(os.path.join(path,
+                                                              file_and_dir)))
+            elif file_type == 'any':
+                paths.append(os.path.abspath(os.path.join(path, file_and_dir)))
+            else:
+                if os.path.splitext(file_and_dir)[1] == file_type:
+                    paths.append(os.path.abspath(os.path.join(path,
+                                                              file_and_dir)))
+    return paths
 
 
-# Randomly crop the image to a specific size. For data augmentation
-def random_crop(image, label, crop_height, crop_width):
-    if (image.shape[0] != label.shape[0]) or (image.shape[1] != label.shape[1]):
-        raise Exception('Image and label must have the same dimensions!')
-        
-    if (crop_width <= image.shape[1]) and (crop_height <= image.shape[0]):
-        x = random.randint(0, image.shape[1]-crop_width)
-        y = random.randint(0, image.shape[0]-crop_height)
-        
-        if len(label.shape) == 3:
-            return image[y:y+crop_height, x:x+crop_width, :], label[y:y+crop_height, x:x+crop_width, :]
+def rotate(image, angle=90):
+    height, width = image.shape[:2]
+    degree = angle
+    heightNew = int(width * math.fabs(math.sin(math.radians(degree))) +
+                    height * math.fabs(math.cos(math.radians(degree))))
+    widthNew = int(height * math.fabs(math.sin(math.radians(degree))) +
+                   width * math.fabs(math.cos(math.radians(degree))))
+    matRotation = cv2.getRotationMatrix2D((width / 2, height / 2), degree, 1)
+    matRotation[0, 2] += (widthNew - width) / 2
+    matRotation[1, 2] += (heightNew - height) / 2
+    imgRotation = cv2.warpAffine(image, matRotation, (widthNew, heightNew), borderValue=(0, 0, 0))
+    return imgRotation
+
+def resize_image(image, size, interpolation='INTER_LINEAR'):
+    if image.shape[0] > size[1]:
+        resize_ratio = size[1] / float(image.shape[0])
+        if interpolation == 'INTER_LINEAR':
+            image = cv2.resize(image, None, fx=resize_ratio, fy=resize_ratio, interpolation=cv2.INTER_LINEAR)
         else:
-            return image[y:y+crop_height, x:x+crop_width, :], label[y:y+crop_height, x:x+crop_width]
-    else:
-        raise Exception('Crop shape (%d, %d) exceeds image dimensions (%d, %d)!' % (crop_height, crop_width, image.shape[0], image.shape[1]))
-
-# Compute the average segmentation accuracy across all classes
-def compute_global_accuracy(pred, label):
-    total = len(label)
-    count = 0.0
-    for i in range(total):
-        if pred[i] == label[i]:
-            count = count + 1.0
-    return float(count) / float(total)
-
-# Compute the class-specific segmentation accuracy
-def compute_class_accuracies(pred, label, num_classes):
-    total = []
-    for val in range(num_classes):
-        total.append((label == val).sum())
-
-    count = [0.0] * num_classes
-    for i in range(len(label)):
-        if pred[i] == label[i]:
-            count[int(pred[i])] = count[int(pred[i])] + 1.0
-
-    # If there are no pixels from a certain class in the GT, 
-    # it returns NAN because of divide by zero
-    # Replace the nans with a 1.0.
-    accuracies = []
-    for i in range(len(total)):
-        if total[i] == 0:
-            accuracies.append(1.0)
+            image = cv2.resize(image, None, fx=resize_ratio, fy=resize_ratio, interpolation=cv2.INTER_NEAREST)
+    if image.shape[1] > size[0]:
+        resize_ratio = size[0] / float(image.shape[1])
+        if interpolation == 'INTER_LINEAR':
+            image = cv2.resize(image, None, fx=resize_ratio, fy=resize_ratio, interpolation=cv2.INTER_LINEAR)
         else:
-            accuracies.append(count[i] / total[i])
-
-    return accuracies
-
-
-def compute_mean_iou(pred, label):
-
-    unique_labels = np.unique(label)
-    num_unique_labels = len(unique_labels);
-
-    I = np.zeros(num_unique_labels)
-    U = np.zeros(num_unique_labels)
-
-    for index, val in enumerate(unique_labels):
-        pred_i = pred == val
-        label_i = label == val
-
-        I[index] = float(np.sum(np.logical_and(label_i, pred_i)))
-        U[index] = float(np.sum(np.logical_or(label_i, pred_i)))
+            image = cv2.resize(image, None, fx=resize_ratio, fy=resize_ratio, interpolation=cv2.INTER_NEAREST)
+    return image, None
 
 
-    mean_iou = np.mean(I / U)
-    return mean_iou
+def random_rotate_and_flip(image, labels, rand_threhold=0.3):
+    """
+    image: 原图
+    labels: list,根据分类数量可能有多个label
+    """
+    # 随机旋转
+    rand_val = random.random()
+    if rand_val < rand_threhold:
+        angle = random.choice([90, 180, 270])
+        image = rotate(image, angle=angle)
+        labels = [rotate(label, angle=angle) for label in labels]
+
+    # 随机水平翻转
+    if random.randint(0, 1):
+        image = cv2.flip(image, 1)
+        labels = [cv2.flip(label, 1) for label in labels]
+
+    # 随机垂直翻转
+    if random.randint(0, 1):
+        image = cv2.flip(image, 0)
+        labels = [cv2.flip(label, 0) for label in labels]
+
+    # 二值化，确保label是二值的
+    thre_labels = []
+    for label in labels:
+        _, thre_label = cv2.threshold(label, 128, 255, cv2.THRESH_BINARY)
+        thre_labels.append(thre_label)
+
+    return image, thre_labels
 
 
-def evaluate_segmentation(pred, label, num_classes, score_averaging="weighted"):
-    flat_pred = pred.flatten()
-    flat_label = label.flatten()
+def random_stretch(image, labels, rand_threhold=0.3):
+    rand_val = random.random()
+    if rand_val < rand_threhold:
+        # 随机拉伸
+        stretch_ratio = random.uniform(0.75, 1.25)
+        rand_w = image.shape[1]
+        rand_h = image.shape[0]
+        if random.randint(0, 1):
+            rand_w = int(rand_w * stretch_ratio)
+        else:
+            rand_h = int(rand_h * stretch_ratio)
 
-    global_accuracy = compute_global_accuracy(flat_pred, flat_label)
-    class_accuracies = compute_class_accuracies(flat_pred, flat_label, num_classes)
+        image = cv2.resize(image, (rand_w, rand_h))
+        labels = [cv2.resize(label, (rand_w, rand_h)) for label in labels]
 
-    prec = precision_score(flat_pred, flat_label, average=score_averaging)
-    rec = recall_score(flat_pred, flat_label, average=score_averaging)
-    f1 = f1_score(flat_pred, flat_label, average=score_averaging)
+    return image, labels
 
-    iou = compute_mean_iou(flat_pred, flat_label)
 
-    return global_accuracy, class_accuracies, prec, rec, f1, iou
+def random_resize_and_paste(image, labels, size, rand_threhold=0.25, corner_threhold=0.7):
+    w_init = size[0]
+    h_init = size[1]
+    rand_val = random.random()
+    if rand_val < rand_threhold:
+        # 对样本进行一定概率的随机尺寸缩放
+        rand_w = np.random.randint(int(w_init * 0.7), w_init)
+        rand_h = np.random.randint(int(h_init * 0.7), h_init)
+        image = cv2.resize(image, (rand_w, rand_h))
+        labels = [cv2.resize(label, (rand_w, rand_h)) for label in labels]
 
-    
-# def compute_class_weights(labels_dir, label_values):
-#     '''
-#     Arguments:
-#         labels_dir(list): Directory where the image segmentation labels are
-#         num_classes(int): the number of classes of pixels in all images
-#
-#     Returns:
-#         class_weights(list): a list of class weights where each index represents each class label and the element is the class weight for that label.
-#
-#     '''
-#     image_files = [os.path.join(labels_dir, file) for file in os.listdir(labels_dir) if file.endswith('.png')]
-#
-#     num_classes = len(label_values)
-#
-#     class_pixels = np.zeros(num_classes)
-#
-#     total_pixels = 0.0
-#
-#     for n in range(len(image_files)):
-#         image = imread(image_files[n])
-#
-#         for index, colour in enumerate(label_values):
-#             class_map = np.all(np.equal(image, colour), axis = -1)
-#             class_map = class_map.astype(np.float32)
-#             class_pixels[index] += np.sum(class_map)
-#
-#
-#         print("\rProcessing image: " + str(n) + " / " + str(len(image_files)), end="")
-#         sys.stdout.flush()
-#
-#     total_pixels = float(np.sum(class_pixels))
-#     index_to_delete = np.argwhere(class_pixels==0.0)
-#     class_pixels = np.delete(class_pixels, index_to_delete)
-#
-#     class_weights = total_pixels / class_pixels
-#     class_weights = class_weights / np.sum(class_weights)
-#
-#     return class_weights
+    h = image.shape[0]
+    w = image.shape[1]
 
-# Compute the memory usage, for debugging
-def memory():
-    import os
-    import psutil
-    pid = os.getpid()
-    py = psutil.Process(pid)
-    memoryUse = py.memory_info()[0]/2.**30  # Memory use in GB
-    print('Memory usage in GBs:', memoryUse)
+    # 计算图像粘贴的起始点范围
+    range_x = w_init - w - 1
+    range_y = h_init - h - 1
 
+    if range_x < 0:
+        range_x = 0
+    if range_y < 0:
+        range_y = 0
+
+    # 随机生成起始点
+    rand_x = random.randint(0, range_x)
+    rand_y = random.randint(0, range_y)
+
+    # 按照一定的概率比例，将训练数据粘贴到空白图像的4个角
+    pos_list = [(0, 0), (0, range_x), (range_y, 0), (range_y, range_x)]
+    rand_index = random.randint(0, 3)
+    rand_pb = random.random()  # 随机产生一个概率
+    if rand_pb < corner_threhold:
+        rand_y = pos_list[rand_index][0]
+        rand_x = pos_list[rand_index][1]
+
+    # 生成空白图像（全白色），用于装载原始图像
+    # 彩色图改为生成随机彩图
+    if image.shape[2] == 3:
+        paste_image = np.ones([h_init, w_init, 3], dtype=np.uint8) * 255
+        # randomByteArray = bytearray(os.urandom(w_init*h_init*3))
+        # flatNumpyArray = np.array(randomByteArray)
+        # paste_image = flatNumpyArray.reshape(h_init, w_init, 3)
+        paste_image[rand_y:h + rand_y, rand_x:w + rand_x, :] = image[:, :, :]
+    else:
+        paste_image = np.ones([h_init, w_init], dtype=np.uint8) * 255
+        paste_image[rand_y:h + rand_y, rand_x:w + rand_x] = image[:, :]
+
+    new_labels = []
+    for n in range(len(labels)):
+        # 生成空白图像（全黑色），用于装载前景掩模图像
+        score_map = np.zeros([h_init, w_init], dtype=np.uint8)
+        score_map[rand_y:h + rand_y, rand_x:w + rand_x] = labels[n][:, :]
+        new_labels.append(score_map)
+
+    return paste_image, new_labels
+
+
+def random_jpg_quality(input_image, CHANNEL_NUM=3):
+    # 压缩原图
+    if random.randint(0, 1):
+        jpg_quality = np.random.randint(60, 100)
+        _, input_image = cv2.imencode('.jpg', input_image, [1, jpg_quality])
+        if CHANNEL_NUM == 3:
+            input_image = cv2.imdecode(input_image, 1)
+        else:
+            input_image = cv2.imdecode(input_image, 0)
+
+    return input_image
+
+def random_bright(input_image):
+    # 随机亮度
+    if random.randint(0, 1):
+        factor = 1.0 + random.uniform(-0.4, 0.4)
+        table = np.array([min((i * factor), 255.) for i in np.arange(0, 256)]).astype(np.uint8)
+        input_image = cv2.LUT(input_image, table)
+
+    return input_image
+
+def focal_loss_weight_map(y_true_cls, y_pred_cls, n_class):
+    # 生成focal loss的weight map
+    gamma = 2.
+    alpha = 0.5
+
+    # 展平
+    flat_y_true_cls = tf.reshape(y_true_cls, [-1, n_class])
+    flat_y_pred_cls = tf.reshape(y_pred_cls, [-1, n_class])
+
+    # 分离通道
+    flat_y_true_cls_split = tf.split(flat_y_true_cls, n_class, axis=1)
+    flat_y_pred_cls_split = tf.split(flat_y_pred_cls, n_class, axis=1)
+
+    pt_list = list()
+    for n in range(n_class):
+        pt = flat_y_true_cls_split[n] * flat_y_pred_cls_split[n] + \
+              (1.0 - flat_y_true_cls_split[n]) * (1.0 - flat_y_pred_cls_split[n])
+        pt_list.append(pt)
+
+    weight_map_list = list()
+    for n in range(n_class):
+        weight_map_list.append(alpha * tf.pow((1.0 - pt_list[n]), gamma))
+
+    # 拼接通道
+    if n_class == 1:
+        weighted_map = weight_map_list[0]
+    else:
+        weighted_map = tf.concat(tuple(weight_map_list), axis=1)
+
+    return weighted_map
