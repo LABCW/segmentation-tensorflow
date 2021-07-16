@@ -1,15 +1,9 @@
 from __future__ import print_function, division
 import os,time,cv2, sys, math
 import tensorflow as tf
-import tensorflow.contrib.slim as slim
 import numpy as np
 import time, datetime
 import os, random
-# from scipy.misc import imread
-import ast
-from sklearn.metrics import precision_score, \
-    recall_score, confusion_matrix, classification_report, \
-    accuracy_score, f1_score
 import helpers
 # from utils import helpers
 

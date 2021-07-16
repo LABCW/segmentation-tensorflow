@@ -16,6 +16,7 @@ from utils.helpers import colour_code_segmentation, one_hot_it
 from builders import model_builder
 from utils.default import _C as config
 from utils.default import update_config
+from augconfig import aug_data
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--cfg', type=str, default="config.yaml", help='config')
@@ -256,6 +257,7 @@ with tf.Session(config=tf_config) as sess:
                         mask_path = os.path.join(mask_train_dir, base_name.split('.')[0] + '_%s' % class_name[n] + config.DATASET.mask_suffix)
                         score_map_in.append(cv2.imread(mask_path, flags=0))
 
+            '''
             # 数据增强
             im_in, score_map_in = random_rotate_and_flip(im_in, score_map_in)
 
@@ -269,6 +271,9 @@ with tf.Session(config=tf_config) as sess:
 
             im_in = random_jpg_quality(im_in)
             im_in = random_bright(im_in)
+            '''
+            im_in, score_map_in = aug_data(config, im_in, score_map_in)
+
 
             # 把图像转成浮点
             im_in = im_in.astype(np.float32)
@@ -312,7 +317,7 @@ with tf.Session(config=tf_config) as sess:
                 # Do the training
                 _, current, summary_str = sess.run([opt, loss, summary_op], feed_dict={net_input: input_image_batch,
                                                                                        net_output: output_image_batch})
-                if g_step % 50 == 0:
+                if g_step % 10 == 0:
                     string_print = "Epoch = %d g_step = %d Current_Loss = %.6f " % (epoch,g_step, current)
                     utils.LOG(string_print)
                     summary_writer.add_summary(summary_str, global_step=g_step)
